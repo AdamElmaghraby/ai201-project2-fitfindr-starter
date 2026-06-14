@@ -77,6 +77,13 @@ If `outfit` is an empty or missing string, the tool does **not** call the LLM �
 
 The agent moves through the three tools in order, but at each step it checks what the previous tool returned and decides whether to continue or stop. It does **not** call all three tools blindly — a failed or empty result ends the flow early. State is tracked in a `session` dict (`selected_item`, `outfit_suggestion`, `fit_card`, `error`).
 
+**Step 0 — Parse the query (regex/string parsing, no LLM):** Before searching, the agent turns the natural-language query into three values and stores them in `session["parsed"]`:
+- `max_price` — first dollar amount found via regex (`\$\s*(\d+(?:\.\d+)?)`, with a fallback for "under/below/less than 30"); `None` if no price is mentioned.
+- `size` — the token after the word "size" (`\bsize\s+(\w+)`); `None` if not mentioned.
+- `description` — the query with the price and size phrases removed and common filler words ("looking for", "a", "the", "under", …) dropped; the leftover keywords are used for the search.
+
+This is deterministic and easy to test. It is forgiving because `search_listings` only scores keywords that actually appear in listings, so stray leftover words contribute nothing.
+
 1. **Call `search_listings(description, size, max_price)`** with the user's query.
    - Check: is the returned list empty?
      - If **empty** → set `session["error"]` to a "no matches, try adjusting your query" message, and **return early — do NOT call `suggest_outfit`.**

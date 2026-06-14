@@ -18,7 +18,56 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import re
+
 from tools import search_listings, suggest_outfit, create_fit_card
+
+
+# ── query parsing ─────────────────────────────────────────────────────────────
+
+# Filler words to drop from the description — they never appear in listings, so
+# removing them just keeps the search keywords clean.
+_FILLER_WORDS = {
+    "looking", "for", "a", "an", "the", "i", "im", "i'm", "want", "wanna",
+    "need", "to", "find", "me", "some", "please", "searching", "search",
+}
+
+
+def _parse_query(query: str) -> dict:
+    """
+    Turn a natural-language query into search parameters using regex/string
+    parsing (no LLM). Returns a dict with description, size, and max_price.
+
+    Examples:
+        "vintage graphic tee under $30, size M"
+            -> {"description": "vintage graphic tee", "size": "M", "max_price": 30.0}
+        "designer ballgown size XXS under $5"
+            -> {"description": "designer ballgown", "size": "XXS", "max_price": 5.0}
+    """
+    text = query.lower()
+
+    # 1. Price: prefer an explicit "$30", fall back to "under/below/less than 30".
+    max_price = None
+    price_match = re.search(r"\$\s*(\d+(?:\.\d+)?)", text) or re.search(
+        r"(?:under|below|less than)\s+\$?(\d+(?:\.\d+)?)", text
+    )
+    if price_match:
+        max_price = float(price_match.group(1))
+
+    # 2. Size: the token right after the word "size".
+    size = None
+    size_match = re.search(r"\bsize\s+(\w+)", text)
+    if size_match:
+        size = size_match.group(1).upper()
+
+    # 3. Description: strip the size and price phrases, then drop filler words.
+    desc = re.sub(r"\bsize\s+\w+", "", text)
+    desc = re.sub(r"(?:under|below|less than)\s+\$?\d+(?:\.\d+)?", "", desc)
+    desc = re.sub(r"\$\s*\d+(?:\.\d+)?", "", desc)
+    words = [w for w in re.findall(r"[a-z']+", desc) if w not in _FILLER_WORDS]
+    description = " ".join(words).strip()
+
+    return {"description": description, "size": size, "max_price": max_price}
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -92,9 +141,46 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
+    # Step 1: fresh session — the single source of truth for this interaction.
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 2: parse the natural-language query into search parameters.
+    parsed = _parse_query(query)
+    session["parsed"] = parsed
+
+    # Step 3: search. Branch on the result — this is the first decision point.
+    results = search_listings(
+        description=parsed["description"],
+        size=parsed["size"],
+        max_price=parsed["max_price"],
+    )
+    session["search_results"] = results
+    if not results:
+        # No matches: stop here. Do NOT call suggest_outfit with empty input.
+        session["error"] = (
+            "I couldn't find any listings matching that. Try raising your max "
+            "price, removing or changing the size, or describing the item in "
+            "broader terms."
+        )
+        return session
+
+    # Step 4: pick the top (most relevant) result and save it as state.
+    session["selected_item"] = results[0]
+
+    # Step 5: suggest an outfit. Second decision point — stop if it comes back
+    # empty (an empty wardrobe is NOT empty here; it returns general advice).
+    suggestion = suggest_outfit(session["selected_item"], wardrobe)
+    if not suggestion or not suggestion.strip():
+        session["error"] = "I found an item but couldn't put an outfit together. Try again."
+        return session
+    session["outfit_suggestion"] = suggestion
+
+    # Step 6: create the shareable fit card from the outfit + the item.
+    session["fit_card"] = create_fit_card(
+        session["outfit_suggestion"], session["selected_item"]
+    )
+
+    # Step 7: return the completed session.
     return session
 
 
