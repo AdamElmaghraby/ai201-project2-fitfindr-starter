@@ -19,7 +19,7 @@ Searches the mock listings dataset (loaded via `load_listings()`) for items that
 
 **Input parameters:**
 - `description` (str): free-text of what the user is looking for (e.g. "vintage graphic tee"). Matched against each listing's `title`, `description`, and `style_tags`.
-- `size` (str or None): the desired size (e.g. "M"). Matched loosely and case-insensitively (substring match), because sizes in the data are inconsistent ("M", "S/M", "XL (oversized)", "W30 L30"). If `None`, size is not used to filter.
+- `size` (str or None): the desired size (e.g. "M"). Matched loosely and case-insensitively by **token**, because sizes in the data are inconsistent ("M", "S/M", "XL (oversized)", "W30 L30"): the listing's size is split into tokens and the requested size must equal one of them. This means "M" matches "S/M" but "L" does NOT match "XL (oversized)". If `None`, size is not used to filter.
 - `max_price` (float or None): the maximum price the user will pay. Only listings with `price <= max_price` are kept. If `None`, price is not used to filter.
 
 **What it returns:**

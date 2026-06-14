@@ -13,6 +13,7 @@ Tools:
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -69,8 +70,46 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    # 1. Load every listing from the dataset (don't re-read the file ourselves).
+    listings = load_listings()
+
+    # Turn the search text into a set of lowercase keywords, e.g.
+    # "Vintage Graphic Tee" -> {"vintage", "graphic", "tee"}.
+    # Using a set means each keyword is counted at most once.
+    keywords = set(description.lower().split())
+
+    matches = []
+    for item in listings:
+        # 2a. Price filter: skip anything above the ceiling (if one was given).
+        if max_price is not None and item["price"] > max_price:
+            continue
+
+        # 2b. Size filter: split the listing's size into whole tokens and keep
+        # the item only if the requested size matches one exactly. This avoids
+        # over-matching (e.g. "L" should NOT match "XL (oversized)" or "W30 L30").
+        if size is not None:
+            size_tokens = re.split(r"[^a-z0-9]+", item["size"].lower())
+            if size.lower() not in size_tokens:
+                continue
+
+        # 3. Relevance score: count how many distinct keywords show up anywhere
+        # in the title, description, or style tags (all lowercased).
+        haystack = (
+            item["title"]
+            + " "
+            + item["description"]
+            + " "
+            + " ".join(item["style_tags"])
+        ).lower()
+        score = sum(1 for kw in keywords if kw in haystack)
+
+        # 4. Drop listings that matched no keywords at all.
+        if score > 0:
+            matches.append((score, item))
+
+    # 5. Sort by score, highest first, and return just the listing dicts.
+    matches.sort(key=lambda pair: pair[0], reverse=True)
+    return [item for _, item in matches]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
@@ -100,8 +139,72 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    # A short, readable description of the thrifted find for the prompt.
+    item_desc = (
+        f"{new_item['title']} "
+        f"(category: {new_item['category']}, "
+        f"colors: {', '.join(new_item['colors'])}, "
+        f"style: {', '.join(new_item['style_tags'])})"
+    )
+
+    # The persona/instructions stay the same whether or not there's a wardrobe.
+    system_prompt = (
+        "You are FitFindr, a sharp, friendly secondhand-fashion stylist. "
+        "You suggest concise but complete, wearable outfits. Be specific and "
+        "practical — name real pieces and how to wear them (tuck, layer, roll). "
+        "Sound like a stylist friend, never like a product description."
+    )
+
+    # Branch on whether the user actually has a wardrobe. An empty wardrobe is
+    # NOT an error — we fall back to general styling advice for the item alone.
+    items = wardrobe.get("items", [])
+    if not items:
+        user_prompt = (
+            f"The user is considering this secondhand find:\n{item_desc}\n\n"
+            "They haven't entered any wardrobe items yet. Suggest ONE complete "
+            "outfit idea describing the kinds of pieces (colors, silhouettes) "
+            "that pair well with this find, then ONE short alternative tweak "
+            "(one sentence). Keep it under ~5 sentences total. Briefly note that "
+            "adding their wardrobe would let you tailor it to what they own."
+        )
+    else:
+        # Format each wardrobe piece into a readable line for the prompt.
+        wardrobe_lines = []
+        for w in items:
+            line = f"- {w['name']} ({w['category']}; {', '.join(w['style_tags'])})"
+            if w.get("notes"):
+                line += f" — {w['notes']}"
+            wardrobe_lines.append(line)
+        wardrobe_text = "\n".join(wardrobe_lines)
+
+        user_prompt = (
+            f"The user is considering this secondhand find:\n{item_desc}\n\n"
+            f"Here is what they already own:\n{wardrobe_text}\n\n"
+            "Suggest ONE complete outfit built around the find, naming specific "
+            "pieces from their wardrobe by name. Then add ONE short alternative "
+            "tweak (one sentence). Keep it under ~5 sentences total — concise, "
+            "specific, and practical."
+        )
+
+    # Call the LLM, wrapped so an API/network error returns a safe string
+    # instead of crashing the agent.
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.7,
+            max_tokens=250,
+        )
+        suggestion = response.choices[0].message.content.strip()
+        if not suggestion:
+            return "Couldn't generate an outfit suggestion right now — try again."
+        return suggestion
+    except Exception as e:
+        return f"Couldn't generate an outfit suggestion right now ({e})."
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -133,5 +236,58 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Before writing code, fill in the Tool 3 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    # 1. Guard an empty / whitespace-only outfit BEFORE calling the LLM. There's
+    # nothing to caption without an outfit, so return a clear message instead of
+    # wasting an API call or crashing.
+    if not outfit or not outfit.strip():
+        return "Can't create a fit card without an outfit suggestion."
+
+    # Pull the concrete details that make a caption feel real (mentioned once each).
+    title = new_item.get("title", "this piece")
+    price = new_item.get("price")
+    platform = new_item.get("platform", "secondhand")
+
+    # 2. Voice instructions: how an actual teen captions a fit in 2026 — casual,
+    # confident, lowercase-leaning, NOT corny or hashtag-stuffed.
+    system_prompt = (
+        "You write outfit captions the way a stylish teen actually posts in 2026: "
+        "short, casual, lowercase-leaning, and effortless. Sound genuinely cool — "
+        "never corny, never like an ad or product description. No hashtag spam. "
+        "Use an emoji only if it genuinely fits (zero or one is fine). Keep it to "
+        "one or two short lines, like a real caption someone would post with a fit pic."
+    )
+
+    # ":g" drops a trailing ".0" so a $18.0 price reads as "$18" in the caption.
+    price_str = f"${price:g}" if price is not None else ""
+    user_prompt = (
+        f"Write a caption for this thrifted fit.\n"
+        f"Item: {title}\n"
+        f"Price: {price_str}\n"
+        f"Platform: {platform}\n"
+        f"Outfit / vibe: {outfit}\n\n"
+        "Mention the item, the price, and where it's from naturally (once each). "
+        "Capture the vibe in specific terms. Make it feel like a real post."
+    )
+
+    # 3. Call the LLM with a HIGHER temperature so the caption varies each run,
+    # and wrap it so an error returns a safe string instead of crashing.
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=1.1,
+            max_tokens=80,
+        )
+        caption = response.choices[0].message.content.strip()
+        # The model occasionally wraps the whole caption in quotes — strip them
+        # so the shareable text reads cleanly.
+        caption = caption.strip('"').strip("'").strip()
+        if not caption:
+            return "Couldn't create a fit card right now — try again."
+        return caption
+    except Exception as e:
+        return f"Couldn't create a fit card right now ({e})."

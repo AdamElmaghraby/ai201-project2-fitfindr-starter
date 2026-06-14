@@ -59,3 +59,18 @@ wardrobe = get_example_wardrobe()
 3. Build and test each tool individually before connecting them through your planning loop.
 
 Your implementation files go in this same directory. There's no required file structure for your agent code — organize it however makes sense for your design.
+
+---
+
+## AI Usage
+
+<!-- Milestone 6 deliverable — running notes to expand into the final write-up. -->
+
+**Instance 1 — `search_listings` size matching (substring → token match):**
+When implementing `search_listings`, my planning.md spec described size matching as a
+case-insensitive **substring** match. While building the tool I caught that pure
+substring matching over-matches: requesting `size="L"` would also match `"XL (oversized)"`
+and `"W30 L30"` because both contain the letter "l". I changed the approach to a
+**token-based** match instead — the listing's size string is split into tokens and the
+requested size must equal a whole token (so "M" matches "S/M", but "L" no longer matches
+"XL"). I also updated the Tool 1 spec in planning.md to reflect this refinement.
